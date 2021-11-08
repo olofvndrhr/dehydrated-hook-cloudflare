@@ -6,42 +6,42 @@
 
 
 log () {
-	printf "   %s\n" "${*}" 1>&2
+  printf "   %s\n" "${*}" 1>&2
 }
 
 success () {
-	printf " + %s\n" "${*}" 1>&2
+  printf " + %s\n" "${*}" 1>&2
 }
 
 error () {
-	printf "ERROR: %s\n" "${*}" 1>&2
+  printf "ERROR: %s\n" "${*}" 1>&2
 }
 
 # exit inside a $() does not work, so we will roll out our own
 scriptexitval=1
 trap "exit \$scriptexitval" SIGKILL
 abort () {
-	scriptexitval=$1
-	kill 0
+  scriptexitval=$1
+  kill 0
 }
 
 cf_req () {
-	local response
-	
-	localdir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )
-	if [[ -f "${localdir}/cftoken" ]]
+  local response
+  
+  localdir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )
+  if [[ -f "${localdir}/cftoken" ]]
     then
       source "${localdir}/cftoken"
   fi
 
-	if [[ -n "${CF_TOKEN}" ]]
+  if [[ -n "${CF_TOKEN}" ]]
     then
       response=$( curl -s \
                   -H "Authorization: Bearer ${CF_TOKEN}" \
                   -H "Content-Type: application/json" \
                       "${@}"
                 )     
-	elif [[ -n "${CF_EMAIL}" ]] && [[ -n "${CF_KEY}" ]]
+  elif [[ -n "${CF_EMAIL}" ]] && [[ -n "${CF_KEY}" ]]
     then
       response=$( curl -s \
                   -H "X-Auth-Email: ${CF_EMAIL}" \
@@ -49,29 +49,29 @@ cf_req () {
                   -H "Content-Type: application/json" \
                       "${@}"
                 )        
-	  else
+    else
       error "Missing CF keys"
       abort 1
-	fi
-	if [[ $? -ne 0 ]]
+  fi
+  if [[ $? -ne 0 ]]
     then
       error "HTTP request failed"
       abort 1
-	fi
+  fi
 
-	local success=$( printf "%s" "${response}" | jq -r ".success" )
-	if [[ "${success}" != true ]]
+  local success=$( printf "%s" "${response}" | jq -r ".success" )
+  if [[ "${success}" != true ]]
     then
       error "CloudFlare request failed"
       error "Response: ${response}"
       abort 1
-	fi
+  fi
 
-	printf "%s" "${response}"
+  printf "%s" "${response}"
 }
 
 get_domain () {
-	local fqdn="${1}"
+  local fqdn="${1}"
   local suffix_url='https://publicsuffix.org/list/public_suffix_list.dat'
 
   curl -so- "${suffix_url}"   |     # fetch from $suffix_url
@@ -84,45 +84,45 @@ get_domain () {
   sed 's/^[0-9\t ]*//'        |     # strip line length
   grep -E "${fqdn/*./}$"      |     # optimisation - only include matching TLDs
   while read suffix
-      do
-        printf "%s" "${fqdn}" | grep -qE '[.]'"${suffix}"'$' || continue    # if $domain does not end in .$suffix, get next suffix
-        domain=$(printf "%s" "${fqdn}" | sed 's/[.]'"${suffix}"'$//' | awk -F '.' '{print $NF}')   # show only the domain without subdomains/tlds
-        printf "%s" "${fqdn}" | grep -o ''"${domain}[.]${suffix}"'$'    # remove subdomains
-        break
+    do
+      printf "%s" "${fqdn}" | grep -qE '[.]'"${suffix}"'$' || continue    # if $domain does not end in .$suffix, get next suffix
+      domain=$(printf "%s" "${fqdn}" | sed 's/[.]'"${suffix}"'$//' | awk -F '.' '{print $NF}')   # show only the domain without subdomains/tlds
+      printf "%s" "${fqdn}" | grep -o ''"${domain}[.]${suffix}"'$'    # remove subdomains
+      break
   done
 }
 
 get_zone_id () {
-	local fqdn="${1}"
-	local domain=$( get_domain "$fqdn" )
+  local fqdn="${1}"
+  local domain=$( get_domain "$fqdn" )
 
-	log "Requesting zone ID for ${fqdn} (domain: ${domain})"
+  log "Requesting zone ID for ${fqdn} (domain: ${domain})"
 
-	local id=$(  cf_req "https://api.cloudflare.com/client/v4/zones?name=${domain}" \
-               | jq -r ".result[0].id"
+  local id=$(  cf_req "https://api.cloudflare.com/client/v4/zones?name=${domain}" \
+                | jq -r ".result[0].id"
             )
 
-	if [[ "${id}" == null ]]
+  if [[ "${id}" == null ]]
     then
       error "Unable to get zone ID for ${fqdn}"
       abort 1
-	fi
+  fi
 
-	success "Zone ID: ${id}"
+  success "Zone ID: ${id}"
 
-	printf "%s" "${id}"
+  printf "%s" "${id}"
 }
 
 wait_for_publication () {
-	local fqdn="${1}"
-	local type="${2}"
-	local content="${3}"
+  local fqdn="${1}"
+  local type="${2}"
+  local content="${3}"
 
-	local retries=12
-	local delay=1000
-	local delaySec
+  local retries=12
+  local delay=1000
+  local delaySec
 
-	while true
+  while true
     do
       if ( dig +noall +answer @ns.cloudflare.com "${fqdn}" "${type}" \
           | awk '{ print $5 }' \
@@ -144,77 +144,77 @@ wait_for_publication () {
           retries=$((retries - 1))
           delay=$((delay * 15 / 10))
       fi
-	done
+  done
 }
 
 create_record () {
-	local zone="${1}"
-	local fqdn="${2}"
-	local type="${3}"
-	local content="${4}"
-	local recordid
+  local zone="${1}"
+  local fqdn="${2}"
+  local type="${3}"
+  local content="${4}"
+  local recordid
 
-	log "Creating record ${fqdn} ${type} ${content}"
+  log "Creating record ${fqdn} ${type} ${content}"
 
-	recordid=$( cf_req -X POST "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records" \
-		          --data "{\"type\":\"${type}\",\"name\":\"${fqdn}\",\"content\":\"${content}\"}" \
+  recordid=$( cf_req -X POST "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records" \
+              --data "{\"type\":\"${type}\",\"name\":\"${fqdn}\",\"content\":\"${content}\"}" \
               | jq -r ".result.id"
             )
 
-	if [[ "${recordid}" == null ]]
+  if [[ "${recordid}" == null ]]
     then
       error "Error creating DNS record"
       abort 1
-	fi
+  fi
 
-	printf "%s" "${recordid}"
+  printf "%s" "${recordid}"
 }
 
 list_record_id () {
-	local zone="${1}"
-	local fqdn="${2}"
+  local zone="${1}"
+  local fqdn="${2}"
 
-	cf_req "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records?name=${fqdn}" \
+  cf_req "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records?name=${fqdn}" \
   |	jq -r ".result[] | .id"
 }
 
 delete_records () {
-	local zone="${1}"
-	local fqdn="${2}"
+  local zone="${1}"
+  local fqdn="${2}"
 
-	log "Deleting record(s) for ${fqdn}"
+  log "Deleting record(s) for ${fqdn}"
 
-	list_record_id "${zone}" "${fqdn}" \
+  list_record_id "${zone}" "${fqdn}" \
   |	while read recordid
       do
         log " - Deleting ${recordid}"
         cf_req -X DELETE "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records/${recordid}" >/dev/null
-	done
+  done
 }
 
 deploy_challenge () {
-	local fqdn="${2}"
-	local token="${4}"
-	local zoneid=$(get_zone_id "${fqdn}")
+  local fqdn="${2}"
+  local token="${4}"
+  local zoneid=$(get_zone_id "${fqdn}")
 
-	recordid=$(create_record "${zoneid}" "_acme-challenge.${fqdn}" TXT "${token}")
-	wait_for_publication "_acme-challenge.${fqdn}" TXT "\"${token}\""
+  recordid=$(create_record "${zoneid}" "_acme-challenge.${fqdn}" TXT "${token}")
+  wait_for_publication "_acme-challenge.${fqdn}" TXT "\"${token}\""
 
-	success "challenge created - CF ID: ${recordid}"
+  success "challenge created - CF ID: ${recordid}"
 }
 
 clean_challenge () {
-	local fqdn="${2}"
-	local zoneid=$(get_zone_id "${fqdn}")
+  local fqdn="${2}"
+  local zoneid=$(get_zone_id "${fqdn}")
 
-	delete_records "${zoneid}" "_acme-challenge.${fqdn}"
+  delete_records "${zoneid}" "_acme-challenge.${fqdn}"
 }
 
 case ${1} in
-	deploy_challenge)
-		deploy_challenge "${@}"
-	;;
-	clean_challenge)
-		clean_challenge "${@}"
-	;;
+  deploy_challenge)
+    deploy_challenge "${@}"
+  ;;
+  clean_challenge)
+    clean_challenge "${@}"
+  ;;
 esac
