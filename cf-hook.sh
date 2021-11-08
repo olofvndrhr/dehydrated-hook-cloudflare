@@ -72,12 +72,24 @@ cf_req () {
 
 get_domain () {
 	local fqdn="${1}"
-  if [[ $( printf "%s" "${fqdn}" | awk -F '.' '{ print NF }' ) -gt "2" ]]
-    then
-      printf "%s" "${fqdn}" | awk -F '.' '{ print $(NF-1)"."$NF }'
-    else
-      printf "%s" "${fqdn}"
-  fi
+  local suffix_url='https://publicsuffix.org/list/public_suffix_list.dat'
+
+  curl -so- "${suffix_url}"   |     # fetch from $suffix_url
+  sed 's/[#\/].*$//'          |     # strip comments
+  sed 's/[*][.]//'            |     # strip wildcard suffixes, like '*.nom.br'
+  sed '/^[\t ]*$/d'           |     # delete blank lines
+  tr '[:upper:]' '[:lower:]'  |     # everything lowercase
+  awk '{print length, $0}'    |     # prepend length of each line to each line
+  sort -n -r                  |     # sort longest-line-first
+  sed 's/^[0-9\t ]*//'        |     # strip line length
+  grep -E "${fqdn/*./}$"      |     # optimisation - only include matching TLDs
+  while read suffix
+      do
+        printf "%s" "${fqdn}" | grep -qE '[.]'"${suffix}"'$' || continue    # if $domain does not end in .$suffix, get next suffix
+        domain=$(printf "%s" "${fqdn}" | sed 's/[.]'"${suffix}"'$//' | awk -F '.' '{print $NF}')   # show only the domain without subdomains/tlds
+        printf "%s" "${fqdn}" | grep -o ''"${domain}[.]${suffix}"'$'    # remove subdomains
+        break
+  done
 }
 
 get_zone_id () {
