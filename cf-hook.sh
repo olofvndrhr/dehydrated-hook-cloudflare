@@ -1,237 +1,293 @@
-#!/bin/bash
-# shellcheck disable=SC2155
-# shellcheck disable=SC2162
-# shellcheck disable=SC2181
-# shellcheck disable=SC2173
+#!/usr/bin/env bash
+# shellcheck disable=
 
+# cloudflare dns challenge bash script for dehydrated.io
 
-log () {
-  printf '   %s\n' "${*}" 1>&2
-}
-
-success () {
-  printf ' + %s\n' "${*}" 1>&2
-}
-
-error () {
-  printf 'ERROR: %s\n' "${*}" 1>&2
-}
+# global vars
+g_credentials_file="credentials"
+g_curl_headers=()
 
 # exit inside a $() does not work, so we will roll out our own
-scriptexitval=1
-trap "exit \$scriptexitval" SIGKILL
-function abort () {
-  scriptexitval=$1
-  kill 0
+trap "exit 1" 10
+PROC=$$
+function abort() {
+    kill -10 "${PROC}"
 }
 
-function cf_req () {
-  local response
-  
-  # source the cloudflare token if the "cftoken" file is present
-  localdir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )
-  if [[ -f "${localdir}/cftoken" ]]; then
-    source "${localdir}/cftoken"
-  fi
-
-  # set auth headers of api requests
-  # if the cloudflare api token is set, use it, else use the email and api key
-  if [[ -n "${CF_TOKEN}" ]]; then
-    response=$( curl -s \
-                -H "Authorization: Bearer ${CF_TOKEN}" \
-                -H "Content-Type: application/json" \
-                    "${@}"
-              )
-  # api token not found, check for api key
-  elif [[ -n "${CF_EMAIL}" ]] && [[ -n "${CF_KEY}" ]]; then
-    response=$( curl -s \
-                -H "X-Auth-Email: ${CF_EMAIL}" \
-                -H "X-Auth-Key: ${CF_KEY}" \
-                -H "Content-Type: application/json" \
-                    "${@}"
-              )
-  # no api token/key found
-  else
-    error 'Missing CF keys'
-    abort 1
-  fi
-
-  # check exit status of request
-  if [[ $? -ne 0 ]]; then
-    error 'HTTP request failed'
-    abort 1
-  fi
-
-  # check request status in json response
-  local success=$( printf '%s' "${response}" | jq -r ".success" )
-  if [[ "${success}" != true ]]; then
-    error 'CloudFlare request failed'
-    error "Response: ${response}"
-    abort 1
-  fi
-
-  # return json response
-  printf '%s' "${response}"
+function out() {
+    local l_msg="${*}"
+    printf ' + Hook: %s\n' "${l_msg}" 1>&2
 }
 
-function get_domain () {
-  local fqdn="${1}"
-  local suffix_url='https://publicsuffix.org/list/public_suffix_list.dat'
-
-  # get domain name of supplied string. it removes any subdomains. works with every tld.
-  # abc.def.com --> def.com
-  # abc.def.co.uk --> def.co.uk
-
-  curl -so- "${suffix_url}"   |     # fetch from $suffix_url
-  sed 's/[#\/].*$//'          |     # strip comments
-  sed 's/[*][.]//'            |     # strip wildcard suffixes, like '*.nom.br'
-  sed '/^[\t ]*$/d'           |     # delete blank lines
-  tr '[:upper:]' '[:lower:]'  |     # everything lowercase
-  awk '{print length, $0}'    |     # prepend length of each line to each line
-  sort -n -r                  |     # sort longest-line-first
-  sed 's/^[0-9\t ]*//'        |     # strip line length
-  grep -E "${fqdn/*./}$"      |     # optimisation - only include matching TLDs
-  while read suffix; do
-    printf '%s' "${fqdn}" | grep -qE '[.]'"${suffix}"'$' || continue    # if $domain does not end in .$suffix, get next suffix
-    domain=$( printf '%s' "${fqdn}" | sed 's/[.]'"${suffix}"'$//' | awk -F '.' '{print $NF}' )   # show only the domain without subdomains/tlds
-    printf '%s' "${fqdn}" | grep -o ''"${domain}[.]${suffix}"'$'    # remove subdomains
-    break
-  done
+function err() {
+    local l_msg="${*}"
+    printf ' + Hook: \033[0;31m%s\033[0m\n' "${l_msg}" 1>&2
 }
 
-function get_zone_id () {
-  local fqdn="${1}"
-  local domain=$( get_domain "$fqdn" )
+function prepare() {
+    local l_localdir
 
-  log "Requesting zone ID for ${fqdn} (domain: ${domain})"
+    l_localdir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-  # get cloudflare zone id of domain
-  local id=$( cf_req "https://api.cloudflare.com/client/v4/zones?name=${domain}" \
-              | jq -r ".result[0].id"
-            )
-
-  # check json response of api call
-  if [[ "${id}" == null ]]; then
-    error "Unable to get zone ID for ${fqdn}"
-    abort 1
-  fi
-
-  success "Zone ID: ${id}"
-
-  # return zone id of domain
-  printf '%s' "${id}"
-}
-
-function wait_for_publication () {
-  local fqdn="${1}"
-  local type="${2}"
-  local content="${3}"
-
-  local retries=12
-  local delay=1000
-  local delaySec
-
-  # check if dns record is already published
-  while true; do
-    if ( dig +noall +answer @ns.cloudflare.com "${fqdn}" "${type}" \
-        | awk '{ print $5 }' \
-        | grep -qF "${content}" ); then
-      # return exit code 0 if record is found
-      return 0
+    # source the cloudflare token if the "credentials" file is present
+    if [[ -f "${l_localdir}/${g_credentials_file}" ]]; then
+        out "sourcing credentials"
+        source "${l_localdir}/${g_credentials_file}"
     fi
 
-    # if counter is on 0, abort
-    if [[ ${retries} -eq 0 ]]; then
-      error "Record ${fqdn} did not get published in time"
-      abort 1
-    # wait for record publication
+    # set auth headers of api requests
+    # if the cloudflare api token is set, use it, else use the email and api key
+    if [[ -n "${CF_TOKEN}" ]]; then
+        g_curl_headers=(
+            -H "Authorization: Bearer ${CF_TOKEN}"
+            -H "Content-Type: application/json"
+        )
+    # api token not found, check for api key
+    elif [[ -n "${CF_EMAIL}" ]] && [[ -n "${CF_KEY}" ]]; then
+        g_curl_headers=(
+            -H "X-Auth-Email: ${CF_EMAIL}"
+            -H "X-Auth-Key: ${CF_KEY}"
+            -H "Content-Type: application/json"
+        )
+    # no api token/key found
     else
-      delaySec=${delay:0:(-3)}.${delay:(-3)}
-      log "Waiting ${delaySec} seconds..."
-      sleep ${delaySec}
-
-      retries=$(( retries - 1 ))
-      delay=$(( delay * 15 / 10 ))
+        err "missing api keys"
+        abort
     fi
-  done
 }
 
-function create_record () {
-  local zone="${1}"
-  local fqdn="${2}"
-  local type="${3}"
-  local content="${4}"
-  local recordid
+function cf_request() {
+    local l_response l_success
 
-  log "Creating record ${fqdn} ${type} ${content}"
+    l_response="$(curl -sS "${g_curl_headers[@]}" "${@}")"
 
-  # create dns record
-  recordid=$( cf_req -X POST "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records" \
-              --data "{\"type\":\"${type}\",\"name\":\"${fqdn}\",\"content\":\"${content}\"}" \
-              | jq -r ".result.id"
-            )
+    # check exit status of request
+    # shellcheck disable=SC2181
+    if [[ ${?} -ne 0 ]]; then
+        err "http request failed"
+        abort
+    fi
 
-  # check json api response from record creation
-  if [[ "${recordid}" == null ]]; then
-    error 'Error creating DNS record'
-    abort 1
-  fi
+    # check request status in json response
+    l_success="$(echo "${l_response}" | jq -r ".success")"
+    if [[ "${l_success}" != "true" ]]; then
+        err "cloudflare request cloud have failed. response: ${l_response}"
+    fi
 
-  # return record id
-  printf '%s' "${recordid}"
+    # return json response
+    printf '%s' "${l_response}"
 }
 
-function list_record_id () {
-  local zone="${1}"
-  local fqdn="${2}"
+function get_domain() {
+    local l_suffix l_domain
+    local l_fqdn="${1}"
+    local l_suffix_url="https://publicsuffix.org/list/public_suffix_list.dat"
 
-  # return ids of _acme created dns records
-  cf_req "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records?name=${fqdn}" \
-  |	jq -r ".result[] | .id"
+    # get domain name of supplied string. it removes any subdomains. works with every tld.
+    # abc.def.com --> def.com
+    # abc.def.co.uk --> def.co.uk
+
+    out "getting tld of fqdn"
+    curl -so- "${l_suffix_url}" \
+        |
+        # fetch from $suffix_url
+        sed 's/[#\/].*$//' \
+        |
+        # strip comments
+        sed 's/[*][.]//' \
+        |
+        # strip wildcard suffixes, like '*.nom.br'
+        sed '/^[\t ]*$/d' \
+        |
+        # delete blank lines
+        tr '[:upper:]' '[:lower:]' \
+        |
+        # everything lowercase
+        awk '{print length, $0}' \
+        |
+        # prepend length of each line to each line
+        sort -n -r \
+        |
+        # sort longest-line-first
+        sed 's/^[0-9\t ]*//' \
+        |
+        # strip line length
+        grep -E "${l_fqdn/*./}$" \
+        |
+        # optimisation - only include matching TLDs
+        while read -r l_suffix; do
+            printf '%s' "${l_fqdn}" | grep -qE '[.]'"${l_suffix}"'$' || continue                             # if $domain does not end in .$suffix, get next suffix
+            l_domain="$(printf '%s' "${l_fqdn}" | sed 's/[.]'"${l_suffix}"'$//' | awk -F '.' '{print $NF}')" # show only the domain without subdomains/tlds
+            printf '%s' "${l_fqdn}" | grep -o ''"${l_domain}[.]${l_suffix}"'$'                               # remove subdomains
+            break
+        done
 }
 
-function delete_records () {
-  local zone="${1}"
-  local fqdn="${2}"
+function get_zone_id() {
+    local l_cf_reply l_domain l_id
+    local l_fqdn="${1}"
 
-  log "Deleting record(s) for ${fqdn}"
+    l_domain="$(get_domain "$l_fqdn")"
 
-  # delete all created _acme txt records
-  list_record_id "${zone}" "${fqdn}" \
-  |	while read recordid; do
-      log " - Deleting ${recordid}"
-      cf_req -X DELETE "https://api.cloudflare.com/client/v4/zones/${zone}/dns_records/${recordid}" >/dev/null
-  done
+    out "requesting zone id for ${l_fqdn} (domain: ${l_domain})"
+
+    # get cloudflare zone id of domain
+    l_cf_reply="$(cf_request "https://api.cloudflare.com/client/v4/zones?name=${l_domain}")"
+
+    l_id="$(echo "${l_cf_reply}" | jq -r ".result[0].id")"
+
+    # check json response of api call
+    if [[ "${l_id}" == "null" ]] || [[ -z "${l_id}" ]]; then
+        err "unable to get zone id for ${l_fqdn}"
+        abort
+    fi
+
+    out "zone id: ${l_id}"
+
+    # return zone id of domain
+    printf '%s' "${l_id}"
 }
 
-function deploy_challenge () {
-  local fqdn="${2}"
-  local token="${4}"
-  local zoneid=$( get_zone_id "${fqdn}" )
+function wait_for_publication() {
+    local l_fqdn="${1}"
+    local l_type="${2}"
+    local l_content="${3}"
 
-  # call function to create the new _acme records
-  recordid=$( create_record "${zoneid}" "_acme-challenge.${fqdn}" TXT "${token}" )
+    local l_retries=10
+    local l_delay=2
 
-  # call function to wait for availability of the new records
-  wait_for_publication "_acme-challenge.${fqdn}" TXT "\"${token}\""
+    # check if dns record is already published
+    while true; do
+        if (
+            dig +noall +answer @ns.cloudflare.com "${l_fqdn}" "${l_type}" \
+                | awk '{ print $5 }' \
+                | grep -qF "${l_content}"
+        ); then
+            # return exit code 0 if record is found
+            return 0
+        fi
 
-  success "challenge created - CF ID: ${recordid}"
+        # if counter is on 0, abort
+        if [[ ${l_retries} -eq 0 ]]; then
+            err "record ${l_fqdn} did not get published in time"
+            abort
+        fi
+        # wait for record publication
+        out "waiting ${l_delay} seconds..."
+        sleep ${l_delay}
+
+        l_retries=$((l_retries - 1))
+        l_delay=$((l_delay + 1))
+    done
 }
 
-function clean_challenge () {
-  local fqdn="${2}"
-  local zoneid=$( get_zone_id "${fqdn}" )
+function create_record() {
+    local l_cf_reply l_record_id
+    local l_zone="${1}"
+    local l_fqdn="${2}"
+    local l_type="${3}"
+    local l_content="${4}"
 
-  # call function to delete _acme records
-  delete_records "${zoneid}" "_acme-challenge.${fqdn}"
+    out "creating record '${l_fqdn}' - '${l_type}' - '${l_content}'"
+
+    # create dns record
+    l_cf_reply="$(
+        cf_request -X POST "https://api.cloudflare.com/client/v4/zones/${l_zone}/dns_records" \
+            --data "{\"type\":\"${l_type}\",\"name\":\"${l_fqdn}\",\"content\":\"${l_content}\"}"
+    )"
+    l_record_id="$(echo "${l_cf_reply}" | jq -r ".result.id")"
+
+    # record may already exist checking it
+    if [[ "$(echo "${l_cf_reply}" | jq -r ".errors[0].message")" == "Record already exists." ]]; then
+        out "record already exists. using this one"
+        l_cf_reply="$(cf_request "https://api.cloudflare.com/client/v4/zones/${l_zone}/dns_records?name=${l_fqdn}&content=${l_content}")"
+        l_record_id="$(echo "${l_cf_reply}" | jq -r ".result[0].id")"
+    fi
+
+    # check json api response from record creation
+    if [[ "${l_record_id}" == "null" ]] || [[ -z "${l_record_id}" ]]; then
+        err "error creating dns record"
+        abort
+    fi
+
+    # return record id
+    printf '%s' "${l_record_id}"
 }
 
-case ${1} in
-  deploy_challenge)
-    deploy_challenge "${@}"
-  ;;
-  clean_challenge)
-    clean_challenge "${@}"
-  ;;
+function get_acme_records() {
+    local l_cf_reply l_record_id_list
+    local l_zone="${1}"
+    local l_fqdn="${2}"
+
+    # return ids of _acme dns records
+    l_cf_reply="$(cf_request "https://api.cloudflare.com/client/v4/zones/${l_zone}/dns_records?name=${l_fqdn}")"
+
+    l_record_id_list="$(echo "${l_cf_reply}" | jq -r ".result[] | .id")"
+
+    # check json api response from record creation
+    if [[ "${l_record_id_list}" == "null" ]]; then
+        err "error getting dns records"
+        return 1
+    fi
+
+    # return record id list
+    echo "${l_record_id_list}"
+}
+
+function delete_records() {
+    local l_records_to_delete
+    local l_zone="${1}"
+    local l_fqdn="${2}"
+
+    out "deleting record(s) for: ${l_fqdn}"
+
+    # get records to delete
+    # shellcheck disable=SC2207
+    l_records_to_delete=($(get_acme_records "${l_zone}" "${l_fqdn}"))
+
+    # delete all _acme txt records
+    for record_id in "${l_records_to_delete[@]}"; do
+        out "deleting record id: ${record_id}"
+        cf_request -X DELETE "https://api.cloudflare.com/client/v4/zones/${l_zone}/dns_records/${record_id}" > /dev/null
+    done
+}
+
+function deploy_challenge() {
+    local l_record_id l_zone_id
+    local l_fqdn="${1}"
+    local l_token="${3}"
+
+    l_zone_id="$(get_zone_id "${l_fqdn}")"
+
+    # call function to create the new _acme records
+    l_record_id="$(create_record "${l_zone_id}" "_acme-challenge.${l_fqdn}" TXT "${l_token}")"
+
+    # call function to wait for availability of the new records
+    wait_for_publication "_acme-challenge.${l_fqdn}" TXT "\"${l_token}\""
+
+    out "challenge created - cf id: ${l_record_id}"
+}
+
+function clean_challenge() {
+    local l_zone_id
+    local l_fqdn="${1}"
+
+    l_zone_id="$(get_zone_id "${l_fqdn}")"
+
+    # call function to delete _acme records
+    delete_records "${l_zone_id}" "_acme-challenge.${l_fqdn}"
+
+}
+
+# prepare
+prepare
+case "${1}" in
+    "deploy_challenge")
+        shift 1
+        deploy_challenge "${@}"
+        ;;
+    "clean_challenge")
+        shift 1
+        clean_challenge "${@}"
+        ;;
 esac
-

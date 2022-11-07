@@ -37,6 +37,6 @@ This method is less secure, as if someone were capable of reading these keys the
 
 For this method, you'd need to `export` the `CF_EMAIL` and `CF_KEY` variables with your CloudFlare email and API key respectively.
 
-### cftoken file
+### credentials file
 
-Alternatively the variables `CF_EMAIL`, `CF_KEY` or `CF_TOKEN` can be added to the cftoken file. They will be read in at execution of the hook. The cftoken file needs to be in the same directory as the hook.sh for it to be read in.
+Alternatively the variables `CF_EMAIL`, `CF_KEY` or `CF_TOKEN` can be added to the `credentials` file. They will be read in at execution of the hook. The credentials file needs to be in the same directory as `cf-hook.sh` for it to be read in.
