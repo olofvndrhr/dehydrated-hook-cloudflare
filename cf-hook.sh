@@ -16,7 +16,7 @@ function abort() {
 
 function out() {
     local l_msg="${*}"
-    printf ' + Hook: %s\n' "${l_msg}" 1>&2
+    printf ' + Hook: %s\n' "${l_msg}"
 }
 
 function err() {
@@ -90,30 +90,48 @@ function get_domain() {
     out "getting tld of fqdn"
     curl -so- "${l_suffix_url}" \
         |
+        
+
         # fetch from $suffix_url
         sed 's/[#\/].*$//' \
         |
+        
+
         # strip comments
         sed 's/[*][.]//' \
         |
+        
+
         # strip wildcard suffixes, like '*.nom.br'
         sed '/^[\t ]*$/d' \
         |
+        
+
         # delete blank lines
         tr '[:upper:]' '[:lower:]' \
         |
+        
+
         # everything lowercase
         awk '{print length, $0}' \
         |
+        
+
         # prepend length of each line to each line
         sort -n -r \
         |
+        
+
         # sort longest-line-first
         sed 's/^[0-9\t ]*//' \
         |
+        
+
         # strip line length
         grep -E "${l_fqdn/*./}$" \
         |
+        
+
         # optimisation - only include matching TLDs
         while read -r l_suffix; do
             printf '%s' "${l_fqdn}" | grep -qE '[.]'"${l_suffix}"'$' || continue                             # if $domain does not end in .$suffix, get next suffix
