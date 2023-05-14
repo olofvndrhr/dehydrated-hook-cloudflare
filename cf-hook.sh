@@ -16,7 +16,7 @@ function abort() {
 
 function out() {
     local l_msg="${*}"
-    printf ' + Hook: %s\n' "${l_msg}"
+    printf ' + Hook: %s\n' "${l_msg}" 1>&2
 }
 
 function err() {
